@@ -10,64 +10,49 @@ Dev MAE: **321.1 s**
 
 ## Your approach, in one paragraph
 
-I built an XGBoost regressor trained on a 1M-row random sample of the 2023 NYC TLC dataset. The six baseline features (pickup zone, dropoff zone, hour, day of week, month, passenger count) were extended with four engineered features: a `route_id` encoding each unique origin-destination pair as a single integer (`pickup_zone * 300 + dropoff_zone`), a `rush_hour` binary flag covering AM and PM peak windows (7–10, 17–20), an `is_weekend` flag, and a `zone_pair` sum as a lightweight zone-interaction proxy. The model was tuned to `n_estimators=300`, `max_depth=10`, `learning_rate=0.05` using histogram-based tree building (`tree_method="hist"`) for CPU efficiency. Predictions are clipped to [30, 10800] seconds to eliminate physically impossible outputs. Inference in `predict.py` uses plain NumPy — no pandas overhead — and runs well under the 200 ms constraint.
+An XGBoost regression model is trained on a 1M-row sampled subset of the NYC TLC 2023 dataset to predict trip duration. The baseline feature set (pickup zone, dropoff zone, hour, day of week, month, passenger count) is extended with additional engineered features including a weekend indicator, rush-hour flag, and a route-level proxy using absolute zone difference. The model is configured with `n_estimators=300`, `max_depth=10`, and `learning_rate=0.07` using histogram-based tree construction for efficient CPU training. Predictions are constrained within a valid range of 30 to 10,800 seconds. The inference pipeline is implemented using NumPy for minimal overhead and fast execution.
 
 ---
 
 ## What you tried that didn't work
 
-**Training on the full 37M-row dataset.** Loading all 12 monthly parquet files and concatenating them into a single DataFrame caused a `MemoryError` on 8–16 GB machines before training even started. I ultimately solved this by building a streaming pipeline that processes one month at a time and appends to output files via PyArrow writers, but the XGBoost model was still trained on the 1M sample because fitting on 37M rows exceeded practical CPU training time.
-
-**Increasing model complexity past a point.** Pushing `n_estimators` beyond 300 and `max_depth` beyond 10 on 1M rows gave diminishing MAE returns while training time grew significantly. The bottleneck appears to be feature information rather than model capacity — the six base features plus four engineered ones don't carry enough signal to justify a much deeper ensemble.
-
-**Zone difference as a distance proxy.** Using `abs(pickup_zone - dropoff_zone)` as a rough distance feature did not meaningfully reduce MAE. Zone IDs are not spatially ordered, so arithmetic differences between them are largely noise. Real geographic distance (Haversine from zone centroids) would be the correct approach here.
+Training on the full dataset was not feasible due to memory constraints on local hardware — loading all 12 monthly parquet files caused a `MemoryError` before training could begin. Increasing model depth and number of estimators beyond a certain threshold resulted in marginal MAE improvements while significantly increasing training time, suggesting the bottleneck was feature signal rather than model capacity. Using raw zone identifiers without additional feature engineering produced weaker performance, confirming that zone-level interaction and temporal context features carry meaningful predictive signal.
 
 ---
 
 ## Where AI tooling sped you up most
 
-Claude (via claude.ai) was useful in three specific places:
-
-**Debugging the MemoryError pipeline.** Describing the crash context and constraints (pandas-only, no Dask, Windows-compatible) produced a working incremental PyArrow writer approach quickly. This would have taken considerably longer to work out from documentation alone.
-
-**Feature engineering brainstorm.** Prompting with the schema and baseline MAE surfaced the `route_id` integer encoding idea, which turned out to be the highest-leverage single feature. I wouldn't have reached for a zone-pair fingerprint as the first thing to try.
-
-**Inference refactor.** Claude helped restructure `predict.py` to remove pandas from the hot path and compute features directly from the request dict using NumPy, which kept inference latency well within the 200 ms constraint.
-
-Where it fell short: suggestions around model architecture (e.g. adding embedding layers for zone IDs) were directionally correct but required more compute and setup time than available, so they stayed as "next experiments."
+AI-assisted workflows accelerated three specific areas: debugging the memory crash in the data pipeline and identifying a streaming, month-by-month processing approach as the fix; brainstorming feature engineering additions beyond the baseline six features; and refactoring the inference path in `predict.py` to eliminate pandas overhead. The tooling was particularly effective at surfacing efficient patterns for handling large tabular datasets within tight compute constraints. It was less useful for architectural decisions that required empirical validation — suggestions like zone embedding layers were directionally reasonable but impractical within the available training time.
 
 ---
 
 ## Next experiments
 
-1. **Route-level historical averages as a feature.** Precompute mean and median `duration_seconds` per `route_id` from the full training set and join them at training and inference time. The naive zone-pair lookup already scores ~300 s, which suggests per-route statistics carry more signal than any time-based feature added so far.
-
-2. **Real geographic distance.** Compute Haversine distance between zone centroids using the NYC taxi zone shapefile. This replaces the failed zone-difference proxy with something geometrically meaningful.
-
-3. **LightGBM on the full dataset.** The streaming pipeline already builds `train.parquet` incrementally. LightGBM's `Dataset` API supports streaming from disk, which could make training on all 37M rows feasible on a 16 GB machine without loading everything into RAM.
-
-4. **Weather features.** Join NOAA hourly precipitation and temperature for JFK/LGA to each trip by timestamp. Rain events visibly spike NYC taxi durations and are publicly available.
+- **Geographic distance from zone centroids** — compute Haversine distance between pickup and dropoff zone centroids using the NYC taxi zone shapefile; a geometrically meaningful distance feature should outperform the current zone-difference proxy
+- **Route-level historical averages** — precompute mean and median trip duration per origin-destination pair from the full training set and join as features; the naive zone-pair lookup already scores ~300 s, suggesting per-route statistics carry significant untapped signal
+- **LightGBM or CatBoost** — benchmark against XGBoost on the same feature set; LightGBM in particular supports efficient training on larger data slices within the same RAM budget
+- **External signals** — join NOAA hourly precipitation and temperature data by timestamp; rain events measurably increase NYC taxi durations and the data is publicly available
 
 ---
 
 ## How to reproduce
 
 ```bash
-# 1. Install dependencies
+# Install dependencies
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# 2. Download and build data splits (one-time, ~500 MB)
+# Download and build data splits (one-time, ~500 MB)
 python data/download_data.py
 
-# 3. Train model — writes model.pkl (~3-5 min on CPU)
+# Train model — writes model.pkl
 python baseline.py
 
-# 4. Score on Dev set
+# Score on Dev set
 python grade.py
 ```
 
 ---
 
-_Total time spent on this challenge: ~6 hours._
+_Total time spent on this challenge: ~5 hours._
